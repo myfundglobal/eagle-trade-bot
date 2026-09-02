@@ -1,9 +1,7 @@
 import telebot
 import yfinance as yf
-import pandas_ta as ta
 import pandas as pd
-import time
-from datetime import datetime, timedelta
+import ta
 import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
@@ -17,102 +15,96 @@ pairs = [
     'EURUSD=X', 'GBPUSD=X', 'AUDUSD=X', 'USDJPY=X', 'USDCAD=X', 'USDCHF=X', 'NZDUSD=X',
     'EURGBP=X', 'EURJPY=X', 'GBPJPY=X', 'AUDJPY=X', 'EURCAD=X', 'AUDCAD=X', 'CADJPY=X', 'CHFJPY=X'
 ]
-last_signal_time = {}
-COOLDOWN_MINUTES = 3 
 
-def get_signal(pair):
-    try:
-        df = yf.download(pair, period="1d", interval="1m", progress=False)
-        if df.empty or len(df) < 50:
-            return None
+def fetch_market_signal():
+    print("Scanning markets for manual request...")
+    for pair in pairs:
+        try:
+            df = yf.download(pair, period="1d", interval="1m", progress=False)
+            if df.empty or len(df) < 50:
+                continue
+                
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            close_prices = df['Close'].squeeze()
+            high_prices = df['High'].squeeze()
+            low_prices = df['Low'].squeeze()
+
+            # Strategy Indicators (SMA 5, 8, 13 + PSAR + ADX 7)
+            df['SMA_5'] = ta.trend.sma_indicator(close_prices, window=5)
+            df['SMA_8'] = ta.trend.sma_indicator(close_prices, window=8)
+            df['SMA_13'] = ta.trend.sma_indicator(close_prices, window=13)
             
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        # Indicators setup
-        df['SMA_5'] = ta.sma(df['Close'], length=5)
-        df['SMA_8'] = ta.sma(df['Close'], length=8)
-        df['SMA_13'] = ta.sma(df['Close'], length=13)
-        
-        psar = ta.psar(df['High'], df['Low'], df['Close'], step=0.03, max_step=0.3)
-        adx = ta.adx(df['High'], df['Low'], df['Close'], length=7)
-        
-        df['ADX_7'] = adx['ADX_7']
-        df['DMP_7'] = adx['DMP_7'] 
-        df['DMN_7'] = adx['DMN_7'] 
-
-        sma_5 = df['SMA_5'].iloc[-1]
-        sma_8 = df['SMA_8'].iloc[-1]
-        sma_13 = df['SMA_13'].iloc[-1]
-        
-        # FIX: PSAR Error fixed to detect both CALL and PUT properly
-        psar_long = psar.iloc[-1, 0]  # Valid in Uptrend
-        psar_short = psar.iloc[-1, 1] # Valid in Downtrend
-        
-        dmp = df['DMP_7'].iloc[-1]
-        dmn = df['DMN_7'].iloc[-1]
-        adx_val = df['ADX_7'].iloc[-1]
-
-        direction = None
-        logic_text = ""
-        
-        if sma_5 > sma_8 > sma_13 and pd.notna(psar_long) and dmp > dmn and adx_val > 20:
-            direction = "🟢 CALL (UP)"
-            logic_text = "SMA Uptrend + PSAR Support + ADX Up"
+            psar_indicator = ta.trend.PSARIndicator(high=high_prices, low=low_prices, close=close_prices, step=0.03, max_step=0.3)
+            df['PSAR'] = psar_indicator.psar()
             
-        elif sma_5 < sma_8 < sma_13 and pd.notna(psar_short) and dmn > dmp and adx_val > 20:
-            direction = "🔴 PUT (DOWN)"
-            logic_text = "SMA Downtrend + PSAR Resistance + ADX Down"
+            adx_indicator = ta.trend.ADXIndicator(high=high_prices, low=low_prices, close=close_prices, window=7)
+            df['ADX_7'] = adx_indicator.adx()
+            df['DMP_7'] = adx_indicator.adx_pos()
+            df['DMN_7'] = adx_indicator.adx_neg()
 
-        if direction:
-            # FIX: Indian Standard Time (IST) fix
-            now_utc = datetime.utcnow()
-            now_ist = now_utc + timedelta(hours=5, minutes=30)
+            sma_5 = float(df['SMA_5'].iloc[-1])
+            sma_8 = float(df['SMA_8'].iloc[-1])
+            sma_13 = float(df['SMA_13'].iloc[-1])
             
-            if pair in last_signal_time:
-                time_since_last = now_ist - last_signal_time[pair]
-                if time_since_last < timedelta(minutes=COOLDOWN_MINUTES):
-                    return None 
-                    
-            last_signal_time[pair] = now_ist
-            entry_time = now_ist.strftime("%I:%M %p")
-            exit_time = (now_ist + timedelta(minutes=1)).strftime("%I:%M %p")
+            current_close = float(close_prices.iloc[-1])
+            current_psar = float(df['PSAR'].iloc[-1])
             
-            message = (
-                f"🦅 **EAGLE TRADING ZONE - 1 MIN SIGNAL** 🦅\n\n"
-                f"📌 **Pair:** {pair.replace('=X', '')}\n"
-                f"🕒 **Entry Time:** {entry_time}\n"
-                f"⏳ **Exit Time:** {exit_time} (1 Min Trade)\n"
-                f"📈 **Direction:** {direction}\n\n"
-                f"⚡ **Logic:** {logic_text}\n"
-                f"⚠️ *Wait for perfect entry. Use 1-Step MTG if required.*"
-            )
-            return message
-    except Exception:
-        return None
-    return None
+            dmp = float(df['DMP_7'].iloc[-1])
+            dmn = float(df['DMN_7'].iloc[-1])
+            adx_val = float(df['ADX_7'].iloc[-1])
 
-# 2. Bot ko Background Thread me chalana
+            direction = None
+            logic_text = ""
+            
+            # Strategy Rules
+            if sma_5 > sma_8 > sma_13 and current_close > current_psar and dmp > dmn and adx_val > 15:
+                direction = "🟢 CALL (UP)"
+                logic_text = "SMA Uptrend + PSAR Support + ADX Up"
+                
+            elif sma_5 < sma_8 < sma_13 and current_close < current_psar and dmn > dmp and adx_val > 15:
+                direction = "🔴 PUT (DOWN)"
+                logic_text = "SMA Downtrend + PSAR Resistance + ADX Down"
+
+            if direction:
+                pair_name = pair.replace('=X', '')
+                message = (
+                    f"🦅 **EAGLE TRADING ZONE - INSTANT SIGNAL** 🦅\n\n"
+                    f"📌 **Pair:** {pair_name}\n"
+                    f"⏳ **Expiry:** 1 Minute\n"
+                    f"📈 **Direction:** {direction}\n\n"
+                    f"⚡ **Logic:** {logic_text}\n"
+                    f"⚠️ *Requested manually via Telegram command.*"
+                )
+                return message
+        except Exception as e:
+            continue
+            
+    return "⚠️ Hazzar pairs scan kiye gaye, lekin abhi koi strong setup nahi mila. Thodi der baad dubara `/signal` try karein!"
+
+# Telegram Command Handler
+@bot.message_handler(commands=['signal', 'new'])
+def send_manual_signal(message):
+    bot.send_message(message.chat.id, "🔍 Scanning high-volume markets for your setup...", parse_mode='Markdown')
+    signal_result = fetch_market_signal()
+    for chat_id in CHAT_IDS:
+        try:
+            bot.send_message(chat_id, signal_result, parse_mode='Markdown')
+        except:
+            pass
+
+# 2. Bot Polling in Background Thread
 def run_bot():
-    print("Eagle Trading Zone Bot Started in Background!")
-    while True:
-        for pair in pairs:
-            signal_msg = get_signal(pair)
-            if signal_msg:
-                try:
-                    for chat_id in CHAT_IDS:
-                        bot.send_message(chat_id, signal_msg, parse_mode='Markdown')
-                    time.sleep(2) 
-                except Exception:
-                    pass
-        time.sleep(60)
+    print("Eagle Trading Zone Command Bot Started! Send /signal on Telegram.")
+    bot.infinity_polling()
 
-# 3. HTTP Server ko Main Thread me rakhna taaki Render error na de
+# 3. HTTP Server to keep alive on hosting platforms
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Eagle Trading Zone Bot is Running 24/7!")
+        self.wfile.write(b"Eagle Trading Zone Command Bot is Running 24/7!")
 
 if __name__ == "__main__":
     bot_thread = threading.Thread(target=run_bot)
