@@ -25,9 +25,9 @@ t = threading.Thread(target=run_server)
 t.daemon = True
 t.start()
 
-# Aapka Telegram Token aur Chat ID
+# Aapka Telegram Token aur Chat IDs (Personal + Channel)
 TELEGRAM_TOKEN = '8807084061:AAF6BQTkW-AQ3XGpQI4eMDLmPbIhYT8_r2o'
-CHAT_ID = '1375185299'
+CHAT_IDS = ['1375185299', '-1003642812085']
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
@@ -111,7 +111,9 @@ while True:
         signal_msg = get_signal(pair)
         if signal_msg:
             try:
-                bot.send_message(CHAT_ID, signal_msg, parse_mode='Markdown')
+                # Dono IDs (Personal aur Channel) par message bhejega
+                for chat_id in CHAT_IDS:
+                    bot.send_message(chat_id, signal_msg, parse_mode='Markdown')
                 time.sleep(2) 
             except Exception:
                 pass
